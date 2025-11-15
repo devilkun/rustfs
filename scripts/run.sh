@@ -51,15 +51,22 @@ export RUSTFS_CONSOLE_ADDRESS=":9001"
 # export RUSTFS_TLS_PATH="./deploy/certs"
 
 # Observability related configuration
-#export RUSTFS_OBS_ENDPOINT=http://localhost:4317 # OpenTelemetry Collector address
+#export RUSTFS_OBS_ENDPOINT=http://localhost:4318 # OpenTelemetry Collector address
+# RustFS OR OTEL exporter configuration
+#export RUSTFS_OBS_TRACE_ENDPOINT=http://localhost:4318 # OpenTelemetry Collector trace address http://localhost:4318/v1/traces
+#export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4318/v1/traces
+#export RUSTFS_OBS_METRIC_ENDPOINT=http://localhost:9090/api/v1/otlp # OpenTelemetry Collector metric address
+#export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://localhost:9090/api/v1/otlp/v1/metrics
+#export RUSTFS_OBS_LOG_ENDPOINT=http://loki:3100/otlp # OpenTelemetry Collector logs address http://loki:3100/otlp/v1/logs
+#export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://loki:3100/otlp/v1/logs
 #export RUSTFS_OBS_USE_STDOUT=false # Whether to use standard output
 #export RUSTFS_OBS_SAMPLE_RATIO=2.0 # Sample ratio, between 0.0-1.0, 0.0 means no sampling, 1.0 means full sampling
 #export RUSTFS_OBS_METER_INTERVAL=1 # Sampling interval in seconds
 #export RUSTFS_OBS_SERVICE_NAME=rustfs # Service name
 #export RUSTFS_OBS_SERVICE_VERSION=0.1.0 # Service version
 export RUSTFS_OBS_ENVIRONMENT=develop # Environment name
-export RUSTFS_OBS_LOGGER_LEVEL=debug # Log level, supports trace, debug, info, warn, error
-export RUSTFS_OBS_LOCAL_LOGGING_ENABLED=true # Whether to enable local logging
+export RUSTFS_OBS_LOGGER_LEVEL=info # Log level, supports trace, debug, info, warn, error
+export RUSTFS_OBS_LOG_STDOUT_ENABLED=false # Whether to enable local stdout logging
 export RUSTFS_OBS_LOG_DIRECTORY="$current_dir/deploy/logs" # Log directory
 export RUSTFS_OBS_LOG_ROTATION_TIME="hour" # Log rotation time unit, can be "second", "minute", "hour", "day"
 export RUSTFS_OBS_LOG_ROTATION_SIZE_MB=100 # Log rotation size in MB
@@ -116,7 +123,29 @@ if [ -n "$1" ]; then
 	export RUSTFS_VOLUMES="$1"
 fi
 
+# Enable jemalloc for memory profiling
+# MALLOC_CONF parameters:
+#   prof:true                - Enable heap profiling
+#   prof_active:true         - Start profiling immediately
+#   lg_prof_sample:16        - Average number of bytes between samples (2^16 = 65536 bytes)
+#   log:true                 - Enable logging
+#   narenas:2                - Number of arenas (controls concurrency and memory fragmentation)
+#   lg_chunk:21              - Chunk size (2^21 = 2MB)
+#   background_thread:true   - Enable background threads for purging
+#   dirty_decay_ms:1000      - Time (ms) before dirty pages are purged
+#   muzzy_decay_ms:1000      - Time (ms) before muzzy pages are purged
+# You can override these defaults by setting the MALLOC_CONF environment variable before running this script.
+if [ -z "$MALLOC_CONF" ]; then
+    export MALLOC_CONF="prof:true,prof_active:true,lg_prof_sample:16,log:true,narenas:2,lg_chunk:21,background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:1000"
+fi
+
 # Start webhook server
 #cargo run --example webhook -p rustfs-notify &
 # Start main service
+# To run with profiling enabled, uncomment the following line and comment the next line
+#cargo run --profile profiling --bin rustfs
+# To run in release mode, use the following line
+#cargo run --profile release --bin rustfs
+# To run in debug mode, use the following line
 cargo run --bin rustfs
+

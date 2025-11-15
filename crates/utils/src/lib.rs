@@ -14,8 +14,6 @@
 
 #[cfg(feature = "tls")]
 pub mod certs;
-#[cfg(feature = "net")]
-pub mod dns_resolver;
 #[cfg(feature = "ip")]
 pub mod ip;
 #[cfg(feature = "net")]
@@ -81,8 +79,8 @@ pub mod sys;
 #[cfg(feature = "sys")]
 pub use sys::user_agent::*;
 
-#[cfg(feature = "sys")]
-pub use sys::envs::*;
-
 #[cfg(feature = "notify")]
 pub use notify::*;
+
+mod envs;
+pub use envs::*;

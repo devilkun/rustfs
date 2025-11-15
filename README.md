@@ -84,15 +84,20 @@ To get started with RustFS, follow these steps:
 
 2. **Docker Quick Start (Option 2)​​**
 
+RustFS container run as non-root user `rustfs` with id `1000`, if you run docker with `-v` to mount host directory into docker container, please make sure the owner of host directory has been changed to `1000`, otherwise you will encounter permission denied error.
+
   ```bash
    # create data and logs directories
    mkdir -p data logs
 
-   # using latest alpha version
-   docker run -d -p 9000:9000 -v $(pwd)/data:/data -v $(pwd)/logs:/logs rustfs/rustfs:alpha
+   # change the owner of those two ditectories
+   chown -R 1000:1000 data logs
 
-   # Specific version
-   docker run -d -p 9000:9000 -v $(pwd)/data:/data -v $(pwd)/logs:/logs rustfs/rustfs:1.0.0.alpha.45
+   # using latest version
+   docker run -d -p 9000:9000 -p 9001:9001 -v $(pwd)/data:/data -v $(pwd)/logs:/logs rustfs/rustfs:latest
+
+   # using specific version
+   docker run -d -p 9000:9000 -p 9001:9001 -v $(pwd)/data:/data -v $(pwd)/logs:/logs rustfs/rustfs:1.0.0.alpha.68
    ```
 
 For docker installation, you can also run the container with docker compose. With the `docker-compose.yml` file under
@@ -138,6 +143,8 @@ observability. If you want to start redis as well as nginx container, you can sp
    make docker-buildx-version VERSION=v1.0.0  # Build specific version
    make help-docker                      # Show all Docker-related commands
    ```
+
+   > **Heads-up (macOS cross-compilation)**: macOS keeps the default `ulimit -n` at 256, so `cargo zigbuild` or `./build-rustfs.sh --platform ...` may fail with `ProcessFdQuotaExceeded` when targeting Linux. The build script now tries to raise the limit automatically, but if you still see the warning, run `ulimit -n 4096` (or higher) in your shell before building.
 
 4. **Build with helm chart(Option 4) - Cloud Native environment**
 
@@ -207,4 +214,3 @@ top charts.
 [Apache 2.0](https://opensource.org/licenses/Apache-2.0)
 
 **RustFS** is a trademark of RustFS, Inc. All other trademarks are the property of their respective owners.
-

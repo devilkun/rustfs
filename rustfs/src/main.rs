@@ -25,6 +25,7 @@ mod storage;
 mod update;
 mod version;
 
+// Ensure the correct path for parse_license is imported
 use crate::server::{
     SHUTDOWN_TIMEOUT, ServiceState, ServiceStateManager, ShutdownSignal, init_event_notifier, shutdown_event_notifier,
     start_audit_system, start_http_server, stop_audit_system, wait_for_shutdown,
@@ -57,11 +58,12 @@ use rustfs_ecstore::{
     update_erasure_type,
 };
 use rustfs_iam::init_iam_sys;
-use rustfs_notify::global::notifier_instance;
+use rustfs_notify::notifier_global;
 use rustfs_obs::{init_obs, set_global_guard};
 use rustfs_targets::arn::TargetID;
 use rustfs_utils::net::parse_and_resolve_address;
 use s3s::s3_error;
+use std::env;
 use std::io::{Error, Result};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -87,7 +89,6 @@ const LOGO: &str = r#"
 #[instrument]
 fn print_server_info() {
     let current_year = chrono::Utc::now().year();
-
     // Use custom macros to print server information
     info!("RustFS Object Storage Server");
     info!("Copyright: 2024-{} RustFS, Inc", current_year);
@@ -110,10 +111,13 @@ async fn async_main() -> Result<()> {
     init_license(opt.license.clone());
 
     // Initialize Observability
-    let guard = init_obs(Some(opt.clone().obs_endpoint)).await;
-
-    // print startup logo
-    info!("{}", LOGO);
+    let guard = match init_obs(Some(opt.clone().obs_endpoint)).await {
+        Ok(g) => g,
+        Err(e) => {
+            println!("Failed to initialize observability: {}", e);
+            return Err(Error::other(e));
+        }
+    };
 
     // Store in global storage
     match set_global_guard(guard).map_err(Error::other) {
@@ -124,9 +128,12 @@ async fn async_main() -> Result<()> {
         }
     }
 
+    // print startup logo
+    info!("{}", LOGO);
+
     // Initialize performance profiling if enabled
     #[cfg(not(target_os = "windows"))]
-    profiling::start_profiling_if_enabled();
+    profiling::init_from_env().await;
 
     // Run parameters
     match run(opt).await {
@@ -182,7 +189,7 @@ async fn run(opt: config::Opt) -> Result<()> {
         );
 
         if eps.drives_per_set > 1 {
-            warn!("WARNING: Host local has more than 0 drives of set. A host failure will result in data becoming unavailable.");
+            warn!(target: "rustfs::main::run","WARNING: Host local has more than 0 drives of set. A host failure will result in data becoming unavailable.");
         }
     }
 
@@ -349,7 +356,7 @@ async fn run(opt: config::Opt) -> Result<()> {
 /// Returns true if the environment variable is not set or set to true/1/yes/on/enabled,
 /// false if set to false/0/no/off/disabled
 fn parse_bool_env_var(var_name: &str, default: bool) -> bool {
-    std::env::var(var_name)
+    env::var(var_name)
         .unwrap_or_else(|_| default.to_string())
         .parse::<bool>()
         .unwrap_or(default)
@@ -436,7 +443,7 @@ async fn handle_shutdown(
 }
 
 fn init_update_check() {
-    let update_check_enable = std::env::var(ENV_UPDATE_CHECK)
+    let update_check_enable = env::var(ENV_UPDATE_CHECK)
         .unwrap_or_else(|_| DEFAULT_UPDATE_CHECK.to_string())
         .parse::<bool>()
         .unwrap_or(DEFAULT_UPDATE_CHECK);
@@ -510,8 +517,7 @@ async fn add_bucket_notification_configuration(buckets: Vec<String>) {
                 process_topic_configurations(&mut event_rules, cfg.topic_configurations.clone(), TargetID::from_str);
                 process_lambda_configurations(&mut event_rules, cfg.lambda_function_configurations.clone(), TargetID::from_str);
 
-                if let Err(e) = notifier_instance()
-                    .add_event_specific_rules(bucket, region, &event_rules)
+                if let Err(e) = notifier_global::add_event_specific_rules(bucket, region, &event_rules)
                     .await
                     .map_err(|e| s3_error!(InternalError, "Failed to add rules: {e}"))
                 {
@@ -544,7 +550,7 @@ async fn init_kms_system(opt: &config::Opt) -> Result<()> {
 
     // If KMS is enabled in configuration, configure and start the service
     if opt.kms_enable {
-        info!("KMS is enabled, configuring and starting service...");
+        info!("KMS is enabled via command line, configuring and starting service...");
 
         // Create KMS configuration from command line options
         let kms_config = match opt.kms_backend.as_str() {
@@ -613,9 +619,34 @@ async fn init_kms_system(opt: &config::Opt) -> Result<()> {
             .await
             .map_err(|e| Error::other(format!("Failed to start KMS: {e}")))?;
 
-        info!("KMS service configured and started successfully");
+        info!("KMS service configured and started successfully from command line options");
     } else {
-        info!("KMS service manager initialized. KMS is ready for dynamic configuration via API.");
+        // Try to load persisted KMS configuration from cluster storage
+        info!("Attempting to load persisted KMS configuration from cluster storage...");
+
+        if let Some(persisted_config) = admin::handlers::kms_dynamic::load_kms_config().await {
+            info!("Found persisted KMS configuration, attempting to configure and start service...");
+
+            // Configure the KMS service with persisted config
+            match service_manager.configure(persisted_config).await {
+                Ok(()) => {
+                    // Start the KMS service
+                    match service_manager.start().await {
+                        Ok(()) => {
+                            info!("KMS service configured and started successfully from persisted configuration");
+                        }
+                        Err(e) => {
+                            warn!("Failed to start KMS with persisted configuration: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to configure KMS with persisted configuration: {}", e);
+                }
+            }
+        } else {
+            info!("No persisted KMS configuration found. KMS is ready for dynamic configuration via API.");
+        }
     }
 
     Ok(())

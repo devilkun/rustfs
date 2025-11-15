@@ -59,7 +59,7 @@ impl AuditSystem {
 
     /// Starts the audit system with the given configuration
     pub async fn start(&self, config: Config) -> AuditResult<()> {
-        let mut state = self.state.write().await;
+        let state = self.state.write().await;
 
         match *state {
             AuditSystemState::Running => {
@@ -72,7 +72,6 @@ impl AuditSystem {
             _ => {}
         }
 
-        *state = AuditSystemState::Starting;
         drop(state);
 
         info!("Starting audit system");
@@ -90,6 +89,17 @@ impl AuditSystem {
         let mut registry = self.registry.lock().await;
         match registry.create_targets_from_config(&config).await {
             Ok(targets) => {
+                if targets.is_empty() {
+                    info!("No enabled audit targets found, keeping audit system stopped");
+                    drop(registry);
+                    return Ok(());
+                }
+
+                {
+                    let mut state = self.state.write().await;
+                    *state = AuditSystemState::Starting;
+                }
+
                 info!(target_count = targets.len(), "Created audit targets successfully");
 
                 // Initialize all targets
@@ -146,7 +156,7 @@ impl AuditSystem {
                 warn!("Audit system is already paused");
                 Ok(())
             }
-            _ => Err(AuditError::Configuration("Cannot pause audit system in current state".to_string())),
+            _ => Err(AuditError::Configuration("Cannot pause audit system in current state".to_string(), None)),
         }
     }
 
@@ -164,7 +174,7 @@ impl AuditSystem {
                 warn!("Audit system is already running");
                 Ok(())
             }
-            _ => Err(AuditError::Configuration("Cannot resume audit system in current state".to_string())),
+            _ => Err(AuditError::Configuration("Cannot resume audit system in current state".to_string(), None)),
         }
     }
 
@@ -460,7 +470,7 @@ impl AuditSystem {
             info!(target_id = %target_id, "Target enabled");
             Ok(())
         } else {
-            Err(AuditError::Configuration(format!("Target not found: {target_id}")))
+            Err(AuditError::Configuration(format!("Target not found: {target_id}"), None))
         }
     }
 
@@ -473,7 +483,7 @@ impl AuditSystem {
             info!(target_id = %target_id, "Target disabled");
             Ok(())
         } else {
-            Err(AuditError::Configuration(format!("Target not found: {target_id}")))
+            Err(AuditError::Configuration(format!("Target not found: {target_id}"), None))
         }
     }
 
@@ -487,7 +497,7 @@ impl AuditSystem {
             info!(target_id = %target_id, "Target removed");
             Ok(())
         } else {
-            Err(AuditError::Configuration(format!("Target not found: {target_id}")))
+            Err(AuditError::Configuration(format!("Target not found: {target_id}"), None))
         }
     }
 

@@ -28,7 +28,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use tokio::net::lookup_host;
 use tokio::time::{Duration, sleep};
-use tracing::{debug, error, info, warn};
+use tracing::{Span, debug, error, info, warn};
 use url::Url;
 
 #[derive(Debug, Deserialize)]
@@ -121,6 +121,8 @@ pub struct NotificationTarget {}
 #[async_trait::async_trait]
 impl Operation for NotificationTarget {
     async fn call(&self, req: S3Request<Body>, params: Params<'_, '_>) -> S3Result<S3Response<(StatusCode, Body)>> {
+        let span = Span::current();
+        let _enter = span.enter();
         // 1. Analyze query parameters
         let (target_type, target_name) = extract_target_params(&params)?;
 
@@ -132,7 +134,7 @@ impl Operation for NotificationTarget {
             check_key_valid(get_session_token(&req.uri, &req.headers).unwrap_or_default(), &input_cred.access_key).await?;
 
         // 3. Get notification system instance
-        let Some(ns) = rustfs_notify::global::notification_system() else {
+        let Some(ns) = rustfs_notify::notification_system() else {
             return Err(s3_error!(InternalError, "notification system not initialized"));
         };
 
@@ -274,6 +276,9 @@ impl Operation for NotificationTarget {
         let mut header = HeaderMap::new();
         header.insert(CONTENT_TYPE, "application/json".parse().unwrap());
         header.insert(CONTENT_LENGTH, "0".parse().unwrap());
+        if let Some(v) = req.headers.get("x-request-id") {
+            header.insert("x-request-id", v.clone());
+        }
         Ok(S3Response::with_headers((StatusCode::OK, Body::empty()), header))
     }
 }
@@ -283,6 +288,8 @@ pub struct ListNotificationTargets {}
 #[async_trait::async_trait]
 impl Operation for ListNotificationTargets {
     async fn call(&self, req: S3Request<Body>, _params: Params<'_, '_>) -> S3Result<S3Response<(StatusCode, Body)>> {
+        let span = Span::current();
+        let _enter = span.enter();
         debug!("ListNotificationTargets call start request params: {:?}", req.uri.query());
 
         // 1. Permission verification
@@ -293,7 +300,7 @@ impl Operation for ListNotificationTargets {
             check_key_valid(get_session_token(&req.uri, &req.headers).unwrap_or_default(), &input_cred.access_key).await?;
 
         // 2. Get notification system instance
-        let Some(ns) = rustfs_notify::global::notification_system() else {
+        let Some(ns) = rustfs_notify::notification_system() else {
             return Err(s3_error!(InternalError, "notification system not initialized"));
         };
 
@@ -320,6 +327,9 @@ impl Operation for ListNotificationTargets {
         debug!("ListNotificationTargets call end, response data length: {}", data.len(),);
         let mut header = HeaderMap::new();
         header.insert(CONTENT_TYPE, "application/json".parse().unwrap());
+        if let Some(v) = req.headers.get("x-request-id") {
+            header.insert("x-request-id", v.clone());
+        }
         Ok(S3Response::with_headers((StatusCode::OK, Body::from(data)), header))
     }
 }
@@ -329,6 +339,8 @@ pub struct ListTargetsArns {}
 #[async_trait::async_trait]
 impl Operation for ListTargetsArns {
     async fn call(&self, req: S3Request<Body>, _params: Params<'_, '_>) -> S3Result<S3Response<(StatusCode, Body)>> {
+        let span = Span::current();
+        let _enter = span.enter();
         debug!("ListTargetsArns call start request params: {:?}", req.uri.query());
 
         // 1. Permission verification
@@ -339,7 +351,7 @@ impl Operation for ListTargetsArns {
             check_key_valid(get_session_token(&req.uri, &req.headers).unwrap_or_default(), &input_cred.access_key).await?;
 
         // 2. Get notification system instance
-        let Some(ns) = rustfs_notify::global::notification_system() else {
+        let Some(ns) = rustfs_notify::notification_system() else {
             return Err(s3_error!(InternalError, "notification system not initialized"));
         };
 
@@ -364,6 +376,9 @@ impl Operation for ListTargetsArns {
         debug!("ListTargetsArns call end, response data length: {}", data.len(),);
         let mut header = HeaderMap::new();
         header.insert(CONTENT_TYPE, "application/json".parse().unwrap());
+        if let Some(v) = req.headers.get("x-request-id") {
+            header.insert("x-request-id", v.clone());
+        }
         Ok(S3Response::with_headers((StatusCode::OK, Body::from(data)), header))
     }
 }
@@ -373,6 +388,8 @@ pub struct RemoveNotificationTarget {}
 #[async_trait::async_trait]
 impl Operation for RemoveNotificationTarget {
     async fn call(&self, req: S3Request<Body>, params: Params<'_, '_>) -> S3Result<S3Response<(StatusCode, Body)>> {
+        let span = Span::current();
+        let _enter = span.enter();
         // 1. Analyze query parameters
         let (target_type, target_name) = extract_target_params(&params)?;
 
@@ -384,7 +401,7 @@ impl Operation for RemoveNotificationTarget {
             check_key_valid(get_session_token(&req.uri, &req.headers).unwrap_or_default(), &input_cred.access_key).await?;
 
         // 3. Get notification system instance
-        let Some(ns) = rustfs_notify::global::notification_system() else {
+        let Some(ns) = rustfs_notify::notification_system() else {
             return Err(s3_error!(InternalError, "notification system not initialized"));
         };
 
@@ -398,6 +415,9 @@ impl Operation for RemoveNotificationTarget {
         let mut header = HeaderMap::new();
         header.insert(CONTENT_TYPE, "application/json".parse().unwrap());
         header.insert(CONTENT_LENGTH, "0".parse().unwrap());
+        if let Some(v) = req.headers.get("x-request-id") {
+            header.insert("x-request-id", v.clone());
+        }
         Ok(S3Response::with_headers((StatusCode::OK, Body::empty()), header))
     }
 }

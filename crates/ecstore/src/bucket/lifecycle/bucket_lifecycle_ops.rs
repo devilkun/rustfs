@@ -18,7 +18,24 @@
 #![allow(unused_must_use)]
 #![allow(clippy::all)]
 
+use crate::bucket::lifecycle::bucket_lifecycle_audit::{LcAuditEvent, LcEventSrc};
+use crate::bucket::lifecycle::lifecycle::{self, ExpirationOptions, Lifecycle, TransitionOptions};
+use crate::bucket::lifecycle::tier_last_day_stats::{DailyAllTierStats, LastDayTierStats};
+use crate::bucket::lifecycle::tier_sweeper::{Jentry, delete_object_from_remote_tier};
+use crate::bucket::object_lock::objectlock_sys::enforce_retention_for_deletion;
+use crate::bucket::{metadata_sys::get_lifecycle_config, versioning_sys::BucketVersioningSys};
+use crate::client::object_api_utils::new_getobjectreader;
+use crate::error::Error;
 use crate::error::StorageError;
+use crate::error::{error_resp_to_object_err, is_err_object_not_found, is_err_version_not_found, is_network_or_host_down};
+use crate::event::name::EventName;
+use crate::event_notification::{EventArgs, send_event};
+use crate::global::GLOBAL_LocalNodeName;
+use crate::global::{GLOBAL_LifecycleSys, GLOBAL_TierConfigMgr, get_global_deployment_id};
+use crate::store::ECStore;
+use crate::store_api::StorageAPI;
+use crate::store_api::{GetObjectReader, HTTPRangeSpec, ObjectInfo, ObjectOptions, ObjectToDelete};
+use crate::tier::warm_backend::WarmBackendGetOpts;
 use async_channel::{Receiver as A_Receiver, Sender as A_Sender, bounded};
 use bytes::BytesMut;
 use futures::Future;
@@ -27,10 +44,15 @@ use lazy_static::lazy_static;
 use rustfs_common::data_usage::TierStats;
 use rustfs_common::heal_channel::rep_has_active_rules;
 use rustfs_common::metrics::{IlmAction, Metrics};
-use rustfs_filemeta::fileinfo::{NULL_VERSION_ID, RestoreStatusOps, is_restored_object_on_disk};
+use rustfs_filemeta::{NULL_VERSION_ID, RestoreStatusOps, is_restored_object_on_disk};
 use rustfs_utils::path::encode_dir_object;
 use rustfs_utils::string::strings_has_prefix_fold;
 use s3s::Body;
+use s3s::dto::{
+    BucketLifecycleConfiguration, DefaultRetention, ReplicationConfiguration, RestoreRequest, RestoreRequestType, RestoreStatus,
+    ServerSideEncryption, Timestamp,
+};
+use s3s::header::{X_AMZ_RESTORE, X_AMZ_SERVER_SIDE_ENCRYPTION, X_AMZ_STORAGE_CLASS};
 use sha2::{Digest, Sha256};
 use std::any::Any;
 use std::collections::HashMap;
@@ -46,31 +68,6 @@ use tokio::sync::{RwLock, mpsc};
 use tracing::{debug, error, info};
 use uuid::Uuid;
 use xxhash_rust::xxh64;
-
-//use rustfs_notify::{BucketNotificationConfig, Event, EventName, LogLevel, NotificationError, init_logger};
-//use rustfs_notify::{initialize, notification_system};
-use super::bucket_lifecycle_audit::{LcAuditEvent, LcEventSrc};
-use super::lifecycle::{self, ExpirationOptions, Lifecycle, TransitionOptions};
-use super::tier_last_day_stats::{DailyAllTierStats, LastDayTierStats};
-use super::tier_sweeper::{Jentry, delete_object_from_remote_tier};
-use crate::bucket::object_lock::objectlock_sys::enforce_retention_for_deletion;
-use crate::bucket::{metadata_sys::get_lifecycle_config, versioning_sys::BucketVersioningSys};
-use crate::client::object_api_utils::new_getobjectreader;
-use crate::error::Error;
-use crate::error::{error_resp_to_object_err, is_err_object_not_found, is_err_version_not_found, is_network_or_host_down};
-use crate::event::name::EventName;
-use crate::event_notification::{EventArgs, send_event};
-use crate::global::GLOBAL_LocalNodeName;
-use crate::global::{GLOBAL_LifecycleSys, GLOBAL_TierConfigMgr, get_global_deployment_id};
-use crate::store::ECStore;
-use crate::store_api::StorageAPI;
-use crate::store_api::{GetObjectReader, HTTPRangeSpec, ObjectInfo, ObjectOptions, ObjectToDelete};
-use crate::tier::warm_backend::WarmBackendGetOpts;
-use s3s::dto::{
-    BucketLifecycleConfiguration, DefaultRetention, ReplicationConfiguration, RestoreRequest, RestoreRequestType, RestoreStatus,
-    ServerSideEncryption, Timestamp,
-};
-use s3s::header::{X_AMZ_RESTORE, X_AMZ_SERVER_SIDE_ENCRYPTION, X_AMZ_STORAGE_CLASS};
 
 pub type TimeFn = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync + 'static>;
 pub type TraceFn =
@@ -118,10 +115,9 @@ struct ExpiryTask {
 impl ExpiryOp for ExpiryTask {
     fn op_hash(&self) -> u64 {
         let mut hasher = Sha256::new();
-        let _ = hasher.write(format!("{}", self.obj_info.bucket).as_bytes());
-        let _ = hasher.write(format!("{}", self.obj_info.name).as_bytes());
-        hasher.flush();
-        xxh64::xxh64(hasher.clone().finalize().as_slice(), XXHASH_SEED)
+        hasher.update(format!("{}", self.obj_info.bucket).as_bytes());
+        hasher.update(format!("{}", self.obj_info.name).as_bytes());
+        xxh64::xxh64(hasher.finalize().as_slice(), XXHASH_SEED)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -174,10 +170,9 @@ struct FreeVersionTask(ObjectInfo);
 impl ExpiryOp for FreeVersionTask {
     fn op_hash(&self) -> u64 {
         let mut hasher = Sha256::new();
-        let _ = hasher.write(format!("{}", self.0.transitioned_object.tier).as_bytes());
-        let _ = hasher.write(format!("{}", self.0.transitioned_object.name).as_bytes());
-        hasher.flush();
-        xxh64::xxh64(hasher.clone().finalize().as_slice(), XXHASH_SEED)
+        hasher.update(format!("{}", self.0.transitioned_object.tier).as_bytes());
+        hasher.update(format!("{}", self.0.transitioned_object.name).as_bytes());
+        xxh64::xxh64(hasher.finalize().as_slice(), XXHASH_SEED)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -194,10 +189,9 @@ struct NewerNoncurrentTask {
 impl ExpiryOp for NewerNoncurrentTask {
     fn op_hash(&self) -> u64 {
         let mut hasher = Sha256::new();
-        let _ = hasher.write(format!("{}", self.bucket).as_bytes());
-        let _ = hasher.write(format!("{}", self.versions[0].object_name).as_bytes());
-        hasher.flush();
-        xxh64::xxh64(hasher.clone().finalize().as_slice(), XXHASH_SEED)
+        hasher.update(format!("{}", self.bucket).as_bytes());
+        hasher.update(format!("{}", self.versions[0].object_name).as_bytes());
+        xxh64::xxh64(hasher.finalize().as_slice(), XXHASH_SEED)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -418,10 +412,9 @@ struct TransitionTask {
 impl ExpiryOp for TransitionTask {
     fn op_hash(&self) -> u64 {
         let mut hasher = Sha256::new();
-        let _ = hasher.write(format!("{}", self.obj_info.bucket).as_bytes());
-        //let _ = hasher.write(format!("{}", self.obj_info.versions[0].object_name).as_bytes());
-        hasher.flush();
-        xxh64::xxh64(hasher.clone().finalize().as_slice(), XXHASH_SEED)
+        hasher.update(format!("{}", self.obj_info.bucket).as_bytes());
+        // hasher.update(format!("{}", self.obj_info.versions[0].object_name).as_bytes());
+        xxh64::xxh64(hasher.finalize().as_slice(), XXHASH_SEED)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -483,7 +476,7 @@ impl TransitionState {
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or_else(|| std::cmp::min(num_cpus::get() as i64, 16));
         let mut n = max_workers;
-        let tw = 8; //globalILMConfig.getTransitionWorkers(); 
+        let tw = 8; //globalILMConfig.getTransitionWorkers();
         if tw > 0 {
             n = tw;
         }
@@ -763,9 +756,8 @@ pub async fn expire_transitioned_object(
 pub fn gen_transition_objname(bucket: &str) -> Result<String, Error> {
     let us = Uuid::new_v4().to_string();
     let mut hasher = Sha256::new();
-    let _ = hasher.write(format!("{}/{}", get_global_deployment_id().unwrap_or_default(), bucket).as_bytes());
-    hasher.flush();
-    let hash = rustfs_utils::crypto::hex(hasher.clone().finalize().as_slice());
+    hasher.update(format!("{}/{}", get_global_deployment_id().unwrap_or_default(), bucket).as_bytes());
+    let hash = rustfs_utils::crypto::hex(hasher.finalize().as_slice());
     let obj = format!("{}/{}/{}/{}", &hash[0..16], &us[0..2], &us[2..4], &us);
     Ok(obj)
 }

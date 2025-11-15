@@ -140,7 +140,7 @@ impl NotificationSystem {
             info!("Initializing target: {}", target.id());
             // Initialize the target
             if let Err(e) = target.init().await {
-                error!("Target {} Initialization failed:{}", target.id(), e);
+                warn!("Target {} Initialization failed:{}", target.id(), e);
                 continue;
             }
             debug!("Target {} initialized successfully,enabled:{}", target_id, target.is_enabled());
@@ -199,7 +199,9 @@ impl NotificationSystem {
         F: FnMut(&mut Config) -> bool, // The closure returns a boolean value indicating whether the configuration has been changed
     {
         let Some(store) = rustfs_ecstore::global::new_object_layer_fn() else {
-            return Err(NotificationError::ServerNotInitialized);
+            return Err(NotificationError::StorageNotAvailable(
+                "Failed to save target configuration: server storage not initialized".to_string(),
+            ));
         };
 
         let mut new_config = rustfs_ecstore::config::com::read_config_without_migrate(store.clone())
@@ -420,7 +422,7 @@ impl NotificationSystem {
             if !e.to_string().contains("ARN not found") {
                 return Err(NotificationError::BucketNotification(e.to_string()));
             } else {
-                error!("{}", e);
+                error!("config validate failed, err: {}", e);
             }
         }
 
